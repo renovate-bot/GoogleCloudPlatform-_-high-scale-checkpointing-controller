@@ -22,12 +22,14 @@ set -o pipefail
 echo "Verifying Docker Executables have appropriate dependencies"
 
 printMissingDep() {
-  if /usr/bin/ldd "$@" | grep "not found"; then
+  if /usr/bin/ldd "$@" 2>&1 | grep -q "not found"; then
     echo "!!! Missing deps for $@ !!!"
+    # Run it again without -q so we see WHICH file is missing
+    ldd "$@" 2>&1 | grep "not found"
     exit 1
   fi
 }
 
 export -f printMissingDep
 
-/usr/bin/find / -type f -executable -print | /usr/bin/xargs -I {} /bin/bash -c 'printMissingDep "{}"'
+/usr/bin/find / -type f -executable -print | /usr/bin/xargs -I {} bash -c 'printMissingDep "{}"'
