@@ -50,6 +50,8 @@ const (
 	tokenBrokerADC                      = "token-broker-adc"
 
 	gkeComponentName = "highscalecheckpointing"
+
+	cpcNameLabel = "highscalecheckpointing.gke.io/config-name"
 )
 
 type preparer struct {
@@ -159,6 +161,7 @@ func (p *preparer) prepareCSIDaemonSet(dsName string) v1.DaemonSet {
 			Labels: map[string]string{
 				"k8s-app":                         "high-scale-checkpointing",
 				"addonmanager.kubernetes.io/mode": "Reconcile",
+				cpcNameLabel:                      p.cpc.GetName(),
 			},
 		},
 		Spec: v1.DaemonSetSpec{
@@ -213,7 +216,10 @@ func (p *preparer) preparePodTemplateSpec() corev1.PodTemplateSpec {
 
 	podTemplate := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
-			Labels: map[string]string{"k8s-app": "high-scale-checkpointing"},
+			Labels: map[string]string{
+				"k8s-app":    "high-scale-checkpointing",
+				cpcNameLabel: p.cpc.GetName(),
+			},
 			Annotations: map[string]string{
 				"seccomp.security.alpha.kubernetes.io/pod": "runtime/default",
 				"gke-gcsfuse/volumes":                      "true",
@@ -827,6 +833,7 @@ func uptimeReconcilerPodTrimmer(obj interface{}) (interface{}, error) {
 			Name:            podObj.Name,
 			Namespace:       podObj.Namespace,
 			OwnerReferences: podObj.OwnerReferences,
+			Labels:          podObj.Labels,
 		},
 		Spec: corev1.PodSpec{
 			// The node name is used to detect conflict between CheckpointConfigurations.

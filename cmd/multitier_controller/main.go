@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"gke-internal.googlesource.com/gke-storage/high-scale-checkpointing/pkg/metrics"
 	cc "gke-internal.googlesource.com/gke-storage/high-scale-checkpointing/pkg/multitier-controller"
 	"gke-internal.googlesource.com/gke-storage/high-scale-checkpointing/pkg/util"
 	"k8s.io/client-go/rest"
@@ -99,9 +100,16 @@ func runController() {
 		klog.Error("metrics and health check http servers can't have the same address")
 	}
 
-	if *enableMetricsCollector && (*projectNumber == "" || *clusterLocation == "" || *clusterName == "" || util.GetEnvVar(util.EnvGKEComponentVersion) == "") {
-		klog.Errorf("--enable-metrics-collector requires --project-number, --cluster-location, --cluster-name and env var %q set", util.EnvGKEComponentVersion)
+	if *enableMetricsCollector && (*projectNumber == "" || *clusterLocation == "" || *clusterName == "" || *metricsAddress == "" || util.GetEnvVar(util.EnvGKEComponentVersion) == "") {
+		klog.Errorf("--enable-metrics-collector requires --project-number, --cluster-location, --cluster-name, --metrics-address and env var %q set", util.EnvGKEComponentVersion)
 		os.Exit(1)
+	}
+
+	if *metricsAddress != "" {
+		metrics.InitControllerMetrics()
+		if err := metrics.EmitGKEComponentVersion(); err != nil {
+			klog.Errorf("Could not emit component version (ignored): %v", err)
+		}
 	}
 
 	uptimeControllerBackoffDuration, err := time.ParseDuration(*uptimeControllerBackoff)

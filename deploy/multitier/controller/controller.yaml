@@ -39,10 +39,14 @@ spec:
         - --image-configmap-name=checkpoint-image-config
         - --local-deploy=true
         - --http-endpoint=:22060
+        - --metrics-address=:9090
         - --driver-name=multitier-checkpoint.csi.storage.gke.io
         - --replication-worker-debug-backup=false
         - --ranks-server-port=19346
         - --enable-uptime-controller=true
+        env:
+        - name: GKE_COMPONENT_VERSION
+          value: "manual deployment"
         resources:
           limits:
           requests:
@@ -57,8 +61,11 @@ spec:
           timeoutSeconds: 10
           periodSeconds: 20
         ports:
-        - name: http-endpoint
+        - name: http
           containerPort: 22060
+          protocol: TCP
+        - name: metrics
+          containerPort: 9090
           protocol: TCP
 ---
 kind: Deployment

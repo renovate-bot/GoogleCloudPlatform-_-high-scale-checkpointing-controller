@@ -39,6 +39,8 @@ type CheckpointConfigurationsGetter interface {
 type CheckpointConfigurationInterface interface {
 	Create(ctx context.Context, checkpointConfiguration *checkpointinggkeiov1.CheckpointConfiguration, opts metav1.CreateOptions) (*checkpointinggkeiov1.CheckpointConfiguration, error)
 	Update(ctx context.Context, checkpointConfiguration *checkpointinggkeiov1.CheckpointConfiguration, opts metav1.UpdateOptions) (*checkpointinggkeiov1.CheckpointConfiguration, error)
+	// Add a +genclient:noStatus comment above the type to avoid generating UpdateStatus().
+	UpdateStatus(ctx context.Context, checkpointConfiguration *checkpointinggkeiov1.CheckpointConfiguration, opts metav1.UpdateOptions) (*checkpointinggkeiov1.CheckpointConfiguration, error)
 	Delete(ctx context.Context, name string, opts metav1.DeleteOptions) error
 	DeleteCollection(ctx context.Context, opts metav1.DeleteOptions, listOpts metav1.ListOptions) error
 	Get(ctx context.Context, name string, opts metav1.GetOptions) (*checkpointinggkeiov1.CheckpointConfiguration, error)

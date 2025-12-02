@@ -45,6 +45,7 @@ import (
 
 	checkpoint "gke-internal.googlesource.com/gke-storage/high-scale-checkpointing/apis/checkpointing.gke.io/v1"
 	"gke-internal.googlesource.com/gke-storage/high-scale-checkpointing/pkg/idfile"
+	"gke-internal.googlesource.com/gke-storage/high-scale-checkpointing/pkg/metrics"
 	"gke-internal.googlesource.com/gke-storage/high-scale-checkpointing/pkg/util"
 )
 
@@ -241,6 +242,7 @@ func NewControllerManager(cfg *rest.Config, opts ControllerOptions) (ctrl.Manage
 			resumeReconcileTimestamp: time.Now(),
 			backoffDuration:          opts.UptimeControllerBackoff,
 			gracePeriod:              5 * time.Minute,
+			namespace:                opts.ManagedNamespace,
 		}
 		if err := ctrl.NewControllerManagedBy(mgr).
 			For(&corev1.Pod{}).
@@ -279,7 +281,7 @@ func (r *reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Get the CheckpointConfiguration
 	var cpc checkpoint.CheckpointConfiguration
-	err = r.Get(ctx, req.NamespacedName, &cpc, &client.GetOptions{})
+	err = r.Get(ctx, req.NamespacedName, &cpc)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			log.Info("checkpointconfiguration no longer exists", "checkpointconfiguration", fmt.Sprintf("%s/%s", req.Namespace, req.Name))
@@ -503,15 +505,17 @@ func (r *reconciler) removeFinalizer(ctx context.Context, cc *checkpoint.Checkpo
 
 type UptimeReconciler struct {
 	client.Client
-	Scheme      *runtime.Scheme
-	csiConfig   csiconfig
-	k8sClient   *kubernetes.Clientset
-	gracePeriod time.Duration
+	Scheme          *runtime.Scheme
+	csiConfig       csiconfig
+	k8sClient       *kubernetes.Clientset
+	namespace       string
+	backoffDuration time.Duration
+	gracePeriod     time.Duration
 
-	podDeleteAttemptCount    int // Tracking attempts instead of deletions avoids overwhelming API server.
-	backoffDuration          time.Duration
-	resumeReconcileTimestamp time.Time
+	// The following fields are protected by mu.
 	mu                       sync.Mutex
+	podDeleteAttemptCount    int // Tracking attempts instead of deletions avoids overwhelming API server.
+	resumeReconcileTimestamp time.Time
 }
 
 // UptimeReconciler deletes unhealthy pods, allowing the daemonset to create new pods.
@@ -524,10 +528,26 @@ func (r *UptimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Paranoid check.
+	if req.NamespacedName.Namespace != r.namespace {
+		return ctrl.Result{}, fmt.Errorf("Unexpected pod namespace skipped: %v", req.NamespacedName)
+	}
+
 	// Only track health for pods owned by the DaemonSet.
 	owner := metav1.GetControllerOf(&pod)
 	if owner == nil || owner.Kind != "DaemonSet" {
 		return ctrl.Result{}, nil
+	}
+
+	configName, haveConfigName := pod.GetLabels()[cpcNameLabel]
+	if !haveConfigName {
+		logger.Error(fmt.Errorf("pod is missing config name label"), "pod config label fetch", "podName", pod.Name)
+		metrics.IncDriverUptimeStatus("", "missing-config")
+		configName = ""
+	} else {
+		// Any errors will be logged, but this will not return an error as we don't want
+		// to block pod deletion.
+		r.updateDaemonSetStatus(ctx, configName, owner.Name)
 	}
 
 	podInFailureState := false
@@ -555,6 +575,8 @@ func (r *UptimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if !podInFailureState {
 		return ctrl.Result{}, nil
 	}
+
+	metrics.IncDriverUptimeStatus(configName, "failure")
 
 	// Having a Mutex esures:
 	// - parallel reconciles can read the resumeReconcileTimestamp properly .
@@ -602,14 +624,55 @@ func (r *UptimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return *reconcilerState, err
 	}
 
+	metrics.IncDriverUptimeStatus(configName, "delete-attempt")
+
 	// Delete the pod immediately.
 	if err := r.Delete(ctx, &pod); err != nil {
 		logger.Error(err, "failed to delete unhealthy pod, will attempt again")
-
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
+	metrics.IncDriverUptimeStatus(configName, "delete")
 	logger.Info("Successfully deleted unhealthy pod.", "podName", pod.Name)
 
 	return ctrl.Result{}, nil
+}
+
+func (r *UptimeReconciler) updateDaemonSetStatus(ctx context.Context, cpcName, dsName string) {
+	logger := log.FromContext(ctx)
+	var ds v1.DaemonSet
+	if err := r.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: dsName}, &ds); err != nil {
+		logger.Error(err, "uptimeReconciler daemonset fetch (ignored)", "config", cpcName, "name", dsName)
+		return
+	}
+	var cpc checkpoint.CheckpointConfiguration
+	if err := r.Get(ctx, types.NamespacedName{Name: cpcName}, &cpc); err != nil {
+		logger.Error(err, "uptimeReconciler cpc fetch (ignored)", "config", cpcName)
+		return
+	}
+
+	needUpdate := false
+	if cpc.Status.CurrentDriverPods != ds.Status.CurrentNumberScheduled {
+		cpc.Status.CurrentDriverPods = ds.Status.CurrentNumberScheduled
+		needUpdate = true
+	}
+	if cpc.Status.MisscheduledDriverPods != ds.Status.NumberMisscheduled {
+		cpc.Status.MisscheduledDriverPods = ds.Status.NumberMisscheduled
+		needUpdate = true
+	}
+	if cpc.Status.DesiredDriverPods != ds.Status.DesiredNumberScheduled {
+		cpc.Status.DesiredDriverPods = ds.Status.DesiredNumberScheduled
+		needUpdate = true
+	}
+	if cpc.Status.ReadyDriverPods != ds.Status.NumberReady {
+		cpc.Status.ReadyDriverPods = ds.Status.NumberReady
+		needUpdate = true
+	}
+
+	if needUpdate {
+		logger.Info("uptimeReconciler status update", "config", cpcName)
+		if err := r.Status().Update(ctx, &cpc); err != nil {
+			logger.Error(err, "uptimeReconciler status update", "config", cpcName)
+		}
+	}
 }

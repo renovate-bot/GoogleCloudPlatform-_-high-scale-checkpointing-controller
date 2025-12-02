@@ -775,6 +775,100 @@ func TestDeletion(t *testing.T) {
 	}
 }
 
+func TestStatus(t *testing.T) {
+	k8sClient, kubeClient, cleanup := createClient(t)
+	defer cleanup()
+
+	const csiNamespace = "controller"
+	ctx := context.Background()
+
+	rec := &UptimeReconciler{
+		Scheme:    scheme.Scheme,
+		Client:    kubeClient,
+		k8sClient: k8sClient,
+		csiConfig: csiconfig{
+			csiNamespace: csiNamespace,
+		},
+		namespace: csiNamespace,
+	}
+
+	if err := rec.Create(ctx, &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: csiNamespace,
+		},
+	}); err != nil {
+		t.Fatalf("can't create namespace: %v", err)
+	}
+
+	cpc := checkpoint.CheckpointConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "config",
+		},
+	}
+	if err := rec.Create(ctx, &cpc); err != nil {
+		t.Fatalf("can't create cpc: %v", err)
+	}
+	ds := appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "driver",
+			Namespace: csiNamespace,
+		},
+		Spec: appsv1.DaemonSetSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"k8s-app": "high-scale-checkpointing"},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"k8s-app": "high-scale-checkpointing",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "container",
+							Image: "image",
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := rec.Create(ctx, &ds); err != nil {
+		t.Fatalf("can't create ds: %v", err)
+	}
+
+	ds.Status = appsv1.DaemonSetStatus{
+		CurrentNumberScheduled: 4,
+		NumberMisscheduled:     3,
+		DesiredNumberScheduled: 2,
+		NumberReady:            1,
+	}
+	if err := rec.Status().Update(ctx, &ds); err != nil {
+		t.Fatalf("can't update ds status: %v", err)
+	}
+
+	rec.updateDaemonSetStatus(ctx, "config", "driver")
+	if err := rec.Get(ctx, types.NamespacedName{Name: "config"}, &cpc); err != nil {
+		t.Fatalf("can't get cpc: %v", err)
+	}
+	if cpc.Status.CurrentDriverPods != 4 || cpc.Status.MisscheduledDriverPods != 3 || cpc.Status.DesiredDriverPods != 2 || cpc.Status.ReadyDriverPods != 1 {
+		t.Errorf("unexpected cpc status: %+v", cpc.Status)
+	}
+
+	ds.Status.NumberReady = 2
+	if err := rec.Status().Update(ctx, &ds); err != nil {
+		t.Fatalf("can't update ds status: %v", err)
+	}
+	rec.updateDaemonSetStatus(ctx, "config", "driver")
+	if err := rec.Get(ctx, types.NamespacedName{Name: "config"}, &cpc); err != nil {
+		t.Fatalf("can't get cpc: %v", err)
+	}
+	if cpc.Status.CurrentDriverPods != 4 || cpc.Status.MisscheduledDriverPods != 3 || cpc.Status.DesiredDriverPods != 2 || cpc.Status.ReadyDriverPods != 2 {
+		t.Errorf("unexpected cpc status: %+v", cpc.Status)
+	}
+}
+
 func cpc(gcsBucketName, finalizer, inMemoryVolumeSize string, nodeSelector map[string]string, tolerations []corev1.Toleration) *checkpoint.CheckpointConfiguration {
 	cpc := checkpoint.CheckpointConfiguration{
 		ObjectMeta: metav1.ObjectMeta{

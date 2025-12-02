@@ -77,13 +77,14 @@ deploy/multitier/controller/csi-container-images.yaml:
 multitier-images:
 	rm -f deploy/multitier/controller/controller-image.yaml
 	rm -f deploy/multitier/controller/csi-container-images.yaml
-	$(MAKE) TAG=$(MULTITIER_TAG) deploy/multitier/controller/controller-image.yaml deploy/multitier/controller/csi-container-images.yaml &
-	$(MAKE) IMAGE=$(MULTITIER_DRIVER_NAME) BUILD_ARGS="--build-arg VERSION=$(MULTITIER_TAG)" \
-          DOCKERFILE=cmd/multitier_driver/Dockerfile TAG=$(MULTITIER_TAG) build-and-push &
-	$(MAKE) IMAGE=$(MULTITIER_STUB_NAME) DOCKERFILE=cmd/multitier_stub/Dockerfile TAG=$(MULTITIER_TAG) build-and-push &
-	$(MAKE) IMAGE=${MULTITIER_CONTROLLER_NAME} DOCKERFILE=cmd/multitier_controller/Dockerfile TAG=$(MULTITIER_TAG) build-and-push &
-	$(MAKE) IMAGE=$(NFS_SERVER_NAME) DOCKERFILE=cmd/nfs_server/Dockerfile TAG=$(MULTITIER_TAG) build-and-push &
-	$(MAKE) IMAGE=$(RANKS_IMAGE_NAME) DOCKERFILE=cmd/multitier_ranks/Dockerfile TAG=$(MULTITIER_TAG) build-and-push &
+	( $(MAKE) TAG=$(MULTITIER_TAG) deploy/multitier/controller/controller-image.yaml deploy/multitier/controller/csi-container-images.yaml & \
+    $(MAKE) IMAGE=$(MULTITIER_DRIVER_NAME) BUILD_ARGS="--build-arg VERSION=$(MULTITIER_TAG)" \
+            DOCKERFILE=cmd/multitier_driver/Dockerfile TAG=$(MULTITIER_TAG) build-and-push & \
+		$(MAKE) IMAGE=$(MULTITIER_STUB_NAME) DOCKERFILE=cmd/multitier_stub/Dockerfile TAG=$(MULTITIER_TAG) build-and-push & \
+		$(MAKE) IMAGE=${MULTITIER_CONTROLLER_NAME} DOCKERFILE=cmd/multitier_controller/Dockerfile TAG=$(MULTITIER_TAG) build-and-push & \
+		$(MAKE) IMAGE=$(NFS_SERVER_NAME) DOCKERFILE=cmd/nfs_server/Dockerfile TAG=$(MULTITIER_TAG) build-and-push & \
+		$(MAKE) IMAGE=$(RANKS_IMAGE_NAME) DOCKERFILE=cmd/multitier_ranks/Dockerfile TAG=$(MULTITIER_TAG) build-and-push & \
+	  wait )
 
 clean-multitier:
 	rm -f deploy/multitier/controller/{controller-image,csi-container-images}.yaml

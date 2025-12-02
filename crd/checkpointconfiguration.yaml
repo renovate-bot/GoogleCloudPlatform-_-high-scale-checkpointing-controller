@@ -67,11 +67,18 @@ spec:
           status:
             type: object
             properties:
-              # instanceHandle is in the form of projects/PROJECT/locations/LOCATION/instances/INSTANCE_NAME
-              instanceHandle:
-                type: string
-              error:
-                type: string
+              currentDriverPods:
+                type: integer
+                format: int32
+              misscheduledDriverPods:
+                type: integer
+                format: int32
+              desiredDriverPods:
+                type: integer
+                format: int32
+              readyDriverPods:
+                type: integer
+                format: int32
     # subresources for the custom resource
     subresources:
       # enables the status subresource

@@ -27,6 +27,9 @@ type CheckpointConfiguration struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 	Spec              CheckpointConfigurationSpec `json:"spec"`
+
+	// +optional
+	Status CheckpointConfigurationStatus `json:"status,omitempty"`
 }
 
 // CheckpointConfigurationSpec is the spec for a CheckpointConfiguration resource.
@@ -49,4 +52,19 @@ type CheckpointConfigurationList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
 	Items           []CheckpointConfiguration `json:"items" protobuf:"bytes,2,rep,name=items"`
+}
+
+// CheckpointConfigurationStatus represents the current status of the configuration.
+type CheckpointConfigurationStatus struct {
+	// CurrentDriverPods is like the daemonset's CurrentNumberScheduled status.
+	CurrentDriverPods int32 `json:"currentDriverPods"`
+
+	// MisscheduledDriverPods is like the daemonset's NumberMisscheduled status.
+	MisscheduledDriverPods int32 `json:"misscheduledDriverPods"`
+
+	// DesiredDriverPods is like the daemonset's DesiredNumberScheduled status.
+	DesiredDriverPods int32 `json:"desiredDriverPods"`
+
+	// ReadyDriverPods is like the daemonset's NumberReady status.
+	ReadyDriverPods int32 `json:"readyDriverPods"`
 }

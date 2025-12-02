@@ -17,6 +17,7 @@ package metrics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -25,8 +26,8 @@ import (
 	"gke-internal.googlesource.com/gke-storage/high-scale-checkpointing/pkg/util"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"k8s.io/component-base/metrics"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 const (
@@ -37,17 +38,27 @@ const (
 )
 
 var (
-	// This metric is exposed only from the controller driver component when GKE_PDCSI_VERSION env variable is set.
-	gkeComponentVersion = metrics.NewGaugeVec(&metrics.GaugeOpts{
+	// Controller metrics
+
+	// gkeComponentVersion is exposed only from the controller driver component when GKE_PDCSI_VERSION env variable is set.
+	gkeComponentVersion = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "component_version",
-		Help: "Metric to expose the version of the PDCSI GKE component.",
+		Help: "PDCSI GKE component version",
 	}, []string{"component_version"})
 
+	// driverUptimeStatus tracks UptimeReconciler behavior.
+	driverUptimeStatus = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "driver_uptime_status",
+		Help: "Status of driver uptime check from controller",
+	}, []string{"config", "status"})
+
 	// Node metrics
+
+	// nodeOperationsSeconds are emitted for both replication api and id file operations.
 	nodeOperationsSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    nodeOperationsSecondsName,
-			Help:    "",
+			Help:    "Driver client operation duration, including replication worker api and idfile",
 			Buckets: []float64{0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 40.0, 45.0, 55.0, 75.0, 120.0},
 		},
 		[]string{"method_name", "framework", "grpc_status_code"},
@@ -126,47 +137,25 @@ func (mm *nodeMetricsManager) RecordNodeOperationWithTimeout(ctx context.Context
 	return opDoneChan
 }
 
-// Controller Metrics Manager
+// Controller Metrics
 
-type ControllerMetricsManager struct {
-	registry metrics.KubeRegistry
+func InitControllerMetrics() {
+	klog.Infof("metrics: %+v %+v", gkeComponentVersion, driverUptimeStatus)
+	metrics.Registry.MustRegister(gkeComponentVersion)
+	metrics.Registry.MustRegister(driverUptimeStatus)
 }
 
-func NewControllerMetricsManager() ControllerMetricsManager {
-	return ControllerMetricsManager{registry: metrics.NewKubeRegistry()}
+func IncDriverUptimeStatus(config, status string) {
+	driverUptimeStatus.With(prometheus.Labels{"config": config, "status": status}).Inc()
 }
 
-func (mm *ControllerMetricsManager) InitializeHTTPHandler(metricsEndpoint string) {
-	mux := http.NewServeMux()
-	mux.Handle(metricsPath, metrics.HandlerFor(
-		mm.registry,
-		metrics.HandlerOpts{
-			ErrorHandling: metrics.ContinueOnError}))
-	go func() {
-		klog.Infof("Metric server listening at %q", metricsEndpoint)
-		if err := http.ListenAndServe(metricsEndpoint, mux); err != nil {
-			klog.Fatalf("Failed to start metric server at specified address (%q) and path (%q): %v", metricsEndpoint, metricsPath, err.Error())
-		}
-	}()
-}
-
-func (mm *ControllerMetricsManager) recordComponentVersionMetric() error {
+func EmitGKEComponentVersion() error {
 	v := util.GetEnvVar(util.EnvGKEComponentVersion)
 	if v == "" {
-		klog.V(2).Info("Skip emitting component version metric")
-		// return fmt.Errorf("Failed to register GKE component version metric, env variable %v not defined", envGKEHighScaleCheckpointingVersion)
+		return fmt.Errorf("Failed to register GKE component version metric, env variable %v not defined", util.EnvGKEComponentVersion)
 	}
 
 	gkeComponentVersion.WithLabelValues(v).Set(1.0)
 	klog.Infof("Recorded GKE component version : %v", v)
-	return nil
-}
-
-func (mm *ControllerMetricsManager) EmitGKEComponentVersion() error {
-	mm.registry.MustRegister(gkeComponentVersion)
-	if err := mm.recordComponentVersionMetric(); err != nil {
-		return err
-	}
-
 	return nil
 }
