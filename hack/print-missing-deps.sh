@@ -32,4 +32,4 @@ printMissingDep() {
 
 export -f printMissingDep
 
-/usr/bin/find / -type f -executable -print | /usr/bin/xargs -I {} bash -c 'printMissingDep "{}"'
+/usr/bin/find / -path /proc -prune -o -type f -executable -print | /usr/bin/xargs -I {} bash -c 'printMissingDep "{}"'
