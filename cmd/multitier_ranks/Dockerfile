@@ -3,7 +3,7 @@
 # This software is provided as-is, without warranty or representation for any
 # use or purpose. Your use of it is subject to your agreement with Google.
 
-FROM --platform=$BUILDPLATFORM google-go.pkg.dev/golang:1.24.3 AS builder
+FROM --platform=$BUILDPLATFORM google-go.pkg.dev/golang:1.25.5@sha256:b9b992fbef86e816ebac77aa06d28a5c92c6619cc0ed3548df91cccf3328e9ca AS builder
 ARG TARGETOS
 ARG TARGETARCH
 ARG CACHEBUST

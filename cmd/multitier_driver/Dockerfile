@@ -7,12 +7,12 @@
 
 ARG VERSION
 
-FROM gke.gcr.io/debian-base:bookworm-v1.0.6-gke.2 AS debian
+FROM gke.gcr.io/debian-base:bookworm-v1.0.6-gke.2@sha256:14264b090b8f98d640e59c85496947061ca68c00fbb092e4a3ce8e42e6ec1cef AS debian
 # Note that netbase is needed to get rpcbind working correctly.
 RUN clean-install \
   mount bash nfs-common netbase
 
-FROM --platform=$BUILDPLATFORM google-go.pkg.dev/golang:1.24.3 AS builder
+FROM --platform=$BUILDPLATFORM google-go.pkg.dev/golang:1.25.5@sha256:b9b992fbef86e816ebac77aa06d28a5c92c6619cc0ed3548df91cccf3328e9ca AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
