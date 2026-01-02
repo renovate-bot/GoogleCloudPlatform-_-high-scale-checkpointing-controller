@@ -594,6 +594,12 @@ func (r *ranksServer) computeAssignment(currPod *podState) (jobsetAssignment, er
 		assignmentRanks, err = assigner.extendFromCurrentRank()
 	}
 
+	// Try #4: Force arbitrary assignment if everything else fails
+	if err != nil {
+		klog.Errorf("strict assignment failed: %v. Falling back to arbitrary assignment", err)
+		assignmentRanks, err = assigner.forceArbitraryAssignment()
+	}
+
 	// These should only be internal errors or some fundamental user configuration problem.
 	if err != nil {
 		return jobsetAssignment{}, status.Errorf(codes.InvalidArgument, "no valid rank assignment possible: %v", err)
@@ -615,6 +621,9 @@ func (r *ranksServer) computeAssignment(currPod *podState) (jobsetAssignment, er
 	rankToPod := make([]types.UID, len(assignmentRanks))
 	podToRank := map[types.UID]int{}
 	for i := range len(assignmentRanks) {
+		if assignmentRanks[i] == nil {
+			return jobsetAssignment{}, status.Errorf(codes.Internal, "incomplete assignment for rank %d", i)
+		}
 		p, found := nodeToPod[assignmentRanks[i].name]
 		if !found {
 			return jobsetAssignment{}, status.Errorf(codes.Internal, "nodeToPod missing update %s", assignmentRanks[i].name)

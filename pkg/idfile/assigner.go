@@ -154,6 +154,24 @@ func (a *assigner) extendFromCurrentRank() ([]*assignerNode, error) {
 	return a.verifyAssignment(rankAssignment)
 }
 
+func (a *assigner) forceArbitraryAssignment() ([]*assignerNode, error) {
+	nodes := []*assignerNode{}
+	for _, node := range a.nodes {
+		nodes = append(nodes, node)
+	}
+	// Sort by name for deterministic assignment
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].name < nodes[j].name
+	})
+
+	if len(nodes) != a.numWorkers {
+		return nil, fmt.Errorf("incorrect node count for arbitrary assignment: %d != %d", len(nodes), a.numWorkers)
+	}
+
+	// We don't verify assignment here because it violates pool/slice constraints by definition
+	return nodes, nil
+}
+
 func (a *assigner) existingAssignment() []*assignerNode {
 	if len(a.nodes) != a.numWorkers {
 		return nil

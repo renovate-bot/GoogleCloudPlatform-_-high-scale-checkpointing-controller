@@ -25,9 +25,11 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"gotest.tools/v3/assert"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	jobsetv1alpha "sigs.k8s.io/jobset/api/jobset/v1alpha2"
 
 	proto "gke-internal.googlesource.com/gke-storage/high-scale-checkpointing/lib/grpc/ranks/proto"
 )
@@ -818,4 +820,272 @@ func TestRanksInconsistentInitialMapping(t *testing.T) {
 		return len(asgn) == numSlices*sliceSize, nil
 	})
 	t.Logf("assignment succeeded, although its value is arbitrary")
+}
+
+func TestRankAssignmentFallback(t *testing.T) {
+	ctx, cleanup := mustSetupRanksCluster(t)
+	defer cleanup(ctx)
+
+	// Setup: 2 slices, 1 worker each.
+	// Node 0: Pool "p1", Rank 0.
+	// Node 1: Pool "p2", Rank 1.
+	const numSlices = 2
+	const sliceSize = 1
+
+	createJobSet(ctx, t, "job", numSlices, sliceSize)
+	createNode(ctx, t, "n0", "p1")
+	createNode(ctx, t, "n1", "p2")
+
+	syncer := newTestSyncer()
+	updaters := []ranksUpdater{}
+	for i := 0; i < 2; i++ {
+		updaters = append(updaters, newRanksAssigningUpdater(RanksService, syncer, nil))
+	}
+
+	pods := make([]*corev1.Pod, 2)
+	pods[0] = createWorker(ctx, t, "job", 0, 0, "n0", 0)
+	pods[1] = createWorker(ctx, t, "job", 1, 0, "n1", 0)
+
+	// Set IP for controller
+	pods[0].Status.PodIP = "192.168.0.1"
+	err := k8sClient.Status().Update(ctx, pods[0])
+	assert.NilError(t, err)
+
+	pods[1].Status.PodIP = "192.168.0.2"
+	err = k8sClient.Status().Update(ctx, pods[1])
+	assert.NilError(t, err)
+
+	// Initial assignment (should succeed smoothly)
+	updaters[0].setState(driverState{
+		Jobset:      "default/job",
+		JobsetShape: "2x1",
+		Node:        "n0",
+		Rank:        0,
+		PodUID:      pods[0].GetUID(),
+	})
+	updaters[1].setState(driverState{
+		Jobset:      "default/job",
+		JobsetShape: "2x1",
+		Node:        "n1",
+		Rank:        1,
+		PodUID:      pods[1].GetUID(),
+	})
+
+	for _, u := range updaters {
+		u.startUpdateLoop(ctx)
+	}
+
+	waitFor(ctx, t, func(ctx context.Context) (bool, error) {
+		asgn := syncer.getAssignments()
+		return len(asgn) == 2, nil
+	})
+
+	// Now change shape to 1x2.
+	// Node 0 (Rank 0) -> Slice 0. Pool "p1".
+	// Node 1 (Rank 1) -> Slice 0. Pool "p2".
+	// Mismatch!
+
+	// Update jobset to 1x2
+	jobset := &jobsetv1alpha.JobSet{}
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: "job", Namespace: "default"}, jobset)
+	assert.NilError(t, err)
+	// 1 slice, 2 workers
+	jobset.Spec.ReplicatedJobs[0].Replicas = 1
+	jobset.Spec.ReplicatedJobs[0].Template.Spec.Parallelism = new(int32)
+	*jobset.Spec.ReplicatedJobs[0].Template.Spec.Parallelism = 2
+	err = k8sClient.Update(ctx, jobset)
+	assert.NilError(t, err)
+
+	// Trigger update with new shape
+	for _, u := range updaters {
+		u.killCurrentUpdateLoop()
+	}
+
+	// Delete old pods to force new assignment request
+	for _, p := range pods {
+		err := k8sClient.Delete(ctx, p)
+		assert.NilError(t, err)
+	}
+	// Recreate pods
+	pods[0] = createWorker(ctx, t, "job", 0, 0, "n0", 0)
+	pods[1] = createWorker(ctx, t, "job", 0, 1, "n1", 0)
+
+	pods[0].Status.PodIP = "192.168.0.3"
+	err = k8sClient.Status().Update(ctx, pods[0])
+	assert.NilError(t, err)
+	pods[1].Status.PodIP = "192.168.0.4"
+	err = k8sClient.Status().Update(ctx, pods[1])
+	assert.NilError(t, err)
+
+	for i, u := range updaters {
+		state := u.getState()
+		state.JobsetShape = "1x2"
+		state.PodUID = pods[i].GetUID()
+		state.Rank = -1 // Reset rank expectation
+		u.setState(state)
+		u.startUpdateLoop(ctx)
+	}
+
+	syncer.clear()
+
+	// Wait for reassignment. It should fall back to arbitrary assignment.
+	// Since we have 2 nodes and want 2 ranks (0 and 1), and forceArbitraryAssignment just assigns 0..N-1 based on name sort.
+	// n0 < n1, so n0 should get 0, n1 should get 1.
+	// This happens to match their previous ranks, but the key is that it SUCCEEDS despite the pool mismatch.
+
+	waitFor(ctx, t, func(ctx context.Context) (bool, error) {
+		asgn := syncer.getAssignments()
+		// We expect them to get re-assigned.
+		// Note: The system might take a moment to realize the shape changed.
+		if len(asgn) != 2 {
+			return false, nil
+		}
+		return true, nil
+	})
+}
+
+func TestRanksInterleavedPools(t *testing.T) {
+	ctx, cleanup := mustSetupRanksCluster(t)
+	defer cleanup(ctx)
+
+	// Setup: 2 slices, 2 workers each.
+	// We want to simulate a scenario where "strict" assignment fails because
+	// the nodes for a single slice don't belong to the same pool.
+	//
+	// Slice 0: Node 0 (Pool A), Node 1 (Pool B)
+	// Slice 1: Node 2 (Pool A), Node 3 (Pool B)
+	//
+	// This violates the implicit assumption that a slice is homogeneous with respect to pool.
+	const numSlices = 2
+	const sliceSize = 2
+
+	createJobSet(ctx, t, "job", numSlices, sliceSize)
+	createNode(ctx, t, "n0", "pool-A")
+	createNode(ctx, t, "n1", "pool-B")
+	createNode(ctx, t, "n2", "pool-A")
+	createNode(ctx, t, "n3", "pool-B")
+
+	syncer := newTestSyncer()
+	updaters := []ranksUpdater{}
+	for i := 0; i < numSlices*sliceSize; i++ {
+		updaters = append(updaters, newRanksAssigningUpdater(RanksService, syncer, nil))
+	}
+
+	pods := make([]*corev1.Pod, numSlices*sliceSize)
+	// Slice 0
+	pods[0] = createWorker(ctx, t, "job", 0, 0, "n0", 0)
+	pods[1] = createWorker(ctx, t, "job", 0, 1, "n1", 0)
+	// Slice 1
+	pods[2] = createWorker(ctx, t, "job", 1, 0, "n2", 0)
+	pods[3] = createWorker(ctx, t, "job", 1, 1, "n3", 0)
+
+	// Set IPs (required for assignment completion)
+	for i := 0; i < numSlices*sliceSize; i++ {
+		pods[i].Status.PodIP = fmt.Sprintf("192.168.0.%d", 10+i)
+		err := k8sClient.Status().Update(ctx, pods[i])
+		assert.NilError(t, err)
+	}
+
+	// Start update loops
+	for i := 0; i < numSlices*sliceSize; i++ {
+		updaters[i].setState(driverState{
+			Jobset:      "default/job",
+			JobsetShape: "2x2",
+			Node:        fmt.Sprintf("n%d", i),
+			Rank:        -1,
+			PodUID:      pods[i].GetUID(),
+		})
+		updaters[i].startUpdateLoop(ctx)
+	}
+
+	// Wait for assignment.
+	// It should succeed via fallback (likely arbitrary assignment).
+	waitFor(ctx, t, func(ctx context.Context) (bool, error) {
+		asgn := syncer.getAssignments()
+		return len(asgn) == numSlices*sliceSize, nil
+	})
+
+	asgn := syncer.getAssignments()
+	assert.Equal(t, len(asgn), numSlices*sliceSize)
+
+	// Check for uniqueness
+	seenRanks := map[int]bool{}
+	for _, rank := range asgn {
+		assert.Assert(t, !seenRanks[rank], "Duplicate rank %d found", rank)
+		seenRanks[rank] = true
+	}
+
+	// Verify controller is one of the nodes (any node with rank 0, which exists)
+	var controllerNode string
+	for node, rank := range asgn {
+		if rank == 0 {
+			controllerNode = node
+			break
+		}
+	}
+	assert.Assert(t, controllerNode != "", "No controller node found (rank 0)")
+
+	// Find IP of controller node
+	var controllerIP string
+	for i := 0; i < numSlices*sliceSize; i++ {
+		if pods[i].Spec.NodeName == controllerNode {
+			controllerIP = pods[i].Status.PodIP
+			break
+		}
+	}
+	assert.Assert(t, controllerIP != "")
+	assert.Assert(t, syncer.controllersAllMatch(controllerIP), "Controller IP mismatch")
+}
+
+func TestRanksFallbackFailure(t *testing.T) {
+	ctx, cleanup := mustSetupRanksCluster(t)
+	defer cleanup(ctx)
+
+	// Setup: 2 ranks expected, but we provide 3 nodes.
+	// This should cause forceArbitraryAssignment to fail.
+	const numSlices = 2
+	const sliceSize = 1
+
+	createJobSet(ctx, t, "job", numSlices, sliceSize)
+	createNode(ctx, t, "n0", "p1")
+	createNode(ctx, t, "n1", "p2")
+	createNode(ctx, t, "n2", "p3") // Extra node
+
+	syncer := newTestSyncer()
+	updaters := []ranksUpdater{}
+	for i := 0; i < 3; i++ {
+		updaters = append(updaters, newRanksAssigningUpdater(RanksService, syncer, nil))
+	}
+
+	pods := make([]*corev1.Pod, 3)
+	pods[0] = createWorker(ctx, t, "job", 0, 0, "n0", 0)
+	pods[1] = createWorker(ctx, t, "job", 1, 0, "n1", 0)
+	pods[2] = createWorker(ctx, t, "job", 0, 0, "n2", 0) // Pretends to be rank 0 of slice 0 on n2
+
+	for i := 0; i < 3; i++ {
+		pods[i].Status.PodIP = fmt.Sprintf("192.168.0.%d", 10+i)
+		err := k8sClient.Status().Update(ctx, pods[i])
+		assert.NilError(t, err)
+	}
+
+	for i := 0; i < 3; i++ {
+		updaters[i].setState(driverState{
+			Jobset:      "default/job",
+			JobsetShape: "2x1",
+			Node:        fmt.Sprintf("n%d", i),
+			Rank:        -1,
+			PodUID:      pods[i].GetUID(),
+		})
+		updaters[i].startUpdateLoop(ctx)
+	}
+
+	// We expect the assignment to FAIL eventually because too many nodes.
+	// But in our current implementation, the server might just log a warning and keep trying or return error.
+	// Let's verify that NO assignments are completed successfully.
+
+	// Give it some time to attempt assignment and fail.
+	time.Sleep(2 * time.Second)
+
+	asgn := syncer.getAssignments()
+	assert.Assert(t, len(asgn) < 2, "Assignment should not complete successfully with too many nodes")
 }
