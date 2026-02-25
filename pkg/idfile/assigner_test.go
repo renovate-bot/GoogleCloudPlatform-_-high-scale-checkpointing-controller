@@ -16,6 +16,7 @@ package idfile
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 
 	"gotest.tools/v3/assert"
@@ -34,12 +35,12 @@ func TestAssignerInitial3x2(t *testing.T) {
 	asg, err := a.extendFromInitialRanks()
 	assert.NilError(t, err)
 
-	assert.Equal(t, asg[0].name, "n0")
-	assert.Equal(t, asg[1].name, "n1")
-	assert.Equal(t, asg[2].name, "n2")
-	assert.Equal(t, asg[3].name, "n3")
-	assert.Equal(t, asg[4].name, "n4")
-	assert.Equal(t, asg[5].name, "n5")
+	assert.Equal(t, asg[0], "n0")
+	assert.Equal(t, asg[1], "n1")
+	assert.Equal(t, asg[2], "n2")
+	assert.Equal(t, asg[3], "n3")
+	assert.Equal(t, asg[4], "n4")
+	assert.Equal(t, asg[5], "n5")
 }
 
 func TestAssignerExtend3x2(t *testing.T) {
@@ -55,12 +56,12 @@ func TestAssignerExtend3x2(t *testing.T) {
 	asg, err := a.extendFromInitialRanks()
 	assert.NilError(t, err)
 
-	assert.Equal(t, asg[0].name, "n0")
-	assert.Equal(t, asg[1].name, "n1")
-	assert.Equal(t, asg[2].name, "n2")
-	assert.Equal(t, asg[3].name, "n3")
-	assert.Equal(t, asg[4].name, "n4")
-	assert.Equal(t, asg[5].name, "n5")
+	assert.Equal(t, asg[0], "n0")
+	assert.Equal(t, asg[1], "n1")
+	assert.Equal(t, asg[2], "n2")
+	assert.Equal(t, asg[3], "n3")
+	assert.Equal(t, asg[4], "n4")
+	assert.Equal(t, asg[5], "n5")
 }
 
 func TestAssignerExtendWithSwap3x2(t *testing.T) {
@@ -128,7 +129,7 @@ func runManyInitialTest(t *testing.T, slices, sizes []int) {
 			for k := 0; k < sliceSize; k++ {
 				i := s*sliceSize + k
 				node := fmt.Sprintf("n%04d", i)
-				assert.Equal(t, asg[i].name, node, node)
+				assert.Equal(t, asg[i], node, node)
 			}
 		}
 	}
@@ -216,4 +217,243 @@ func TestAssignerManyLargeExtend(t *testing.T) {
 func TestAssignerManyUnbalancedExtend(t *testing.T) {
 	runManyCurrentTest(t, []int{128, 256, 512, 1024, 2048}, []int{1, 2, 8, 16})
 	runManyCurrentTest(t, []int{1, 2, 4, 8, 16}, []int{128, 256, 512, 1024, 2048})
+}
+
+func TestAssignerSuperslicePoolOrderGuess(t *testing.T) {
+	testCases := []struct {
+		name     string
+		cubeSize int
+		numPools int
+		nodes    []*assignerNode
+		want     []string
+		wantErr  bool
+	}{
+		{
+			name:     "single cube",
+			cubeSize: 5,
+			numPools: 1,
+			nodes: []*assignerNode{
+				{pool: "0", currentRank: 3},
+			},
+			want: []string{"0"},
+		},
+		{
+			name:     "single cube, out of bounds",
+			cubeSize: 5,
+			numPools: 1,
+			nodes: []*assignerNode{
+				{pool: "0", currentRank: 5},
+			},
+			wantErr: true,
+		},
+		{
+			name:     "conflict resolution",
+			cubeSize: 10,
+			numPools: 3,
+			nodes: []*assignerNode{
+				{pool: "0", currentRank: 12}, // Rounds to 10
+				{pool: "1", currentRank: 15}, // Rounds to 10 -> Conflict!
+				{pool: "2", currentRank: 25}, // Rounds to 20
+			},
+			want: []string{"0", "1", "2"},
+		},
+		{
+			name:     "rank fallback and gaps",
+			cubeSize: 2,
+			numPools: 2,
+			nodes: []*assignerNode{
+				{pool: "0", currentRank: -1, initialRank: 4}, // Rounds to 4 (Index 2)
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			pools := map[string]bool{}
+			for i := 0; i < tc.numPools; i++ {
+				pools[fmt.Sprintf("%d", i)] = true
+			}
+			nodes := map[string]*assignerNode{}
+			for _, n := range tc.nodes {
+				nodes[n.name] = n
+			}
+			a := &assigner{
+				nodes: nodes,
+				pools: pools,
+			}
+
+			got, err := a.superslicePoolOrderGuess(tc.cubeSize)
+
+			if (err != nil) != tc.wantErr {
+				t.Errorf("wantErr = %v, got error: %v", tc.wantErr, err)
+			}
+
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAssignerSuperslicePoolIndex(t *testing.T) {
+	testCases := []struct {
+		name     string
+		k        int
+		cubeSize int
+		ranks    []int
+		want     []string
+		wantErr  bool
+	}{
+		{
+			name:     "preassigned 4 cube",
+			k:        0,
+			cubeSize: 4,
+			ranks:    []int{0, 3, 1, 2},
+			want:     []string{"00", "02", "03", "01"},
+		},
+		{
+			name:     "another preassigned 4 cube",
+			k:        3,
+			cubeSize: 4,
+			ranks:    []int{13, 12, 15, 14},
+			want:     []string{"01", "00", "03", "02"},
+		},
+		{
+			name:     "4 cube out of range",
+			k:        1,
+			cubeSize: 4,
+			ranks:    []int{5, 7, 4, 1},
+			want:     []string{"02", "00", "03", "01"},
+		},
+		{
+			name:     "4 cube duplicate",
+			k:        0,
+			cubeSize: 4,
+			ranks:    []int{0, 1, 3, 1},
+			want:     []string{"00", "01", "03", "02"},
+		},
+		{
+			name:     "16 cube nearly there",
+			k:        1,
+			cubeSize: 16,
+			ranks:    []int{16, 17, 18, 19, 25, 21, 22, 23, 24, 20, 26, 27, 28, 29, 30, 31},
+			want:     []string{"00", "01", "02", "03", "09", "05", "06", "07", "08", "04", "10", "11", "12", "13", "14", "15"},
+		},
+		{
+			name:     "too many nodes",
+			k:        0,
+			cubeSize: 4,
+			ranks:    []int{0, 1, 2, 3, 4},
+			wantErr:  true,
+		},
+		{
+			name:     "missing nodes",
+			k:        0,
+			cubeSize: 4,
+			ranks:    []int{0, 1, 2},
+			wantErr:  true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newAssigner(tc.cubeSize, tc.k+1)
+			for i, r := range tc.ranks {
+				if r&1 == 1 {
+					a.addNode(fmt.Sprintf("%02d", i), "pool", -1, r)
+				} else {
+					a.addNode(fmt.Sprintf("%02d", i), "pool", r, r+1)
+				}
+			}
+			// A couple random nodes which should be ignored.
+			a.addNode("random-0", "another-pool", 0, -1)
+			a.addNode("random-1", "another-pool", -1, 0)
+			rankedNodes, err := a.assignSuperslicePoolIndex("pool", tc.k, tc.cubeSize)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("wantErr = %v, got error: %v", tc.wantErr, err)
+			}
+			if !reflect.DeepEqual(rankedNodes, tc.want) {
+				t.Errorf("got %v, want %v", rankedNodes, tc.want)
+			}
+		})
+	}
+}
+
+func TestAssignerSuperslice(t *testing.T) {
+	testCases := []struct {
+		name                        string
+		slices, sliceSize, cubeSize int
+		nodes                       []int
+		want                        []string
+		wantErr                     bool
+	}{
+		{
+			name:      "2x4, already ordered",
+			slices:    1,
+			sliceSize: 8,
+			cubeSize:  4,
+			nodes:     []int{0, 1, 2, 3, 4, 5, 6, 7},
+			want:      []string{"00", "01", "02", "03", "04", "05", "06", "07"},
+		},
+		{
+			name:      "2x4, deranged",
+			slices:    1,
+			sliceSize: 8,
+			cubeSize:  4,
+			nodes:     []int{0, 1, 4, 3, 2, 5, 6, 7},
+			want:      []string{"00", "01", "02", "03", "04", "05", "06", "07"},
+		},
+		{
+			name:      "2x4, rearranged",
+			slices:    1,
+			sliceSize: 8,
+			cubeSize:  4,
+			nodes:     []int{0, 1, 3, 4, 2, 5, 6, 7},
+			want:      []string{"00", "01", "03", "02", "04", "05", "06", "07"},
+		},
+		{
+			name:      "2x4, mixed up within cube",
+			slices:    1,
+			sliceSize: 8,
+			cubeSize:  4,
+			nodes:     []int{3, 1, 2, 0, 7, 6, 4, 5},
+			want:      []string{"03", "01", "02", "00", "06", "07", "05", "04"},
+		},
+		{
+			name:      "single node pool",
+			slices:    1,
+			sliceSize: 4,
+			cubeSize:  4,
+			nodes:     []int{0, 3, 2, 1},
+			want:      []string{"00", "03", "02", "01"},
+		},
+		{
+			name:      "multislice",
+			slices:    3,
+			sliceSize: 32,
+			cubeSize:  16,
+			wantErr:   true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newAssigner(tc.slices, tc.sliceSize)
+			for i, r := range tc.nodes {
+				poolStr := fmt.Sprintf("p%02d", i/tc.cubeSize)
+				nodeStr := fmt.Sprintf("%02d", i)
+				if r&1 == 1 {
+					a.addNode(nodeStr, poolStr, -1, r)
+				} else {
+					a.addNode(nodeStr, poolStr, r, r+1)
+				}
+			}
+			rankedNodes, err := a.supersliceAssignment()
+			if (err != nil) != tc.wantErr {
+				t.Errorf("wantErr = %v, got error: %v", tc.wantErr, err)
+			}
+			if !reflect.DeepEqual(rankedNodes, tc.want) {
+				t.Errorf("got %v, want %v", rankedNodes, tc.want)
+			}
+		})
+	}
 }

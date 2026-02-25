@@ -17,6 +17,7 @@ package multitiercontroller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -52,6 +53,8 @@ const (
 	gkeComponentName = "highscalecheckpointing"
 
 	cpcNameLabel = "highscalecheckpointing.gke.io/config-name"
+
+	replicationOptionVerboseLogs = "verbose-logs"
 )
 
 type preparer struct {
@@ -59,6 +62,8 @@ type preparer struct {
 	cpc           *checkpoint.CheckpointConfiguration
 	metricsConfig *MetricsCollectorConfig
 	tmpfsSizeMib  string
+
+	verboseReplicationWorkerLogs bool
 
 	registrarImage         string
 	csiImage               string
@@ -81,11 +86,23 @@ func newPreparer(ctx context.Context, k8sClient *kubernetes.Clientset, config *c
 		return nil, fmt.Errorf("invalid inMemoryVolumeSize format:  %+v", err)
 	}
 
+	replicationOpts := []string{replicationOptionVerboseLogs}
+	badOpts := []string{}
+	for _, opt := range cpc.Spec.ReplicationOptions {
+		if !slices.Contains(replicationOpts, opt) {
+			badOpts = append(badOpts, opt)
+		}
+	}
+	if len(badOpts) > 0 {
+		return nil, fmt.Errorf("bad replicationOptions in CheckpointConfiguration: %v", badOpts)
+	}
+
 	p := &preparer{
-		config:        config,
-		cpc:           cpc,
-		tmpfsSizeMib:  strconv.FormatInt(tmpfsSizeMib, 10),
-		metricsConfig: metricsiconfig,
+		config:                       config,
+		cpc:                          cpc,
+		tmpfsSizeMib:                 strconv.FormatInt(tmpfsSizeMib, 10),
+		metricsConfig:                metricsiconfig,
+		verboseReplicationWorkerLogs: slices.Contains(cpc.Spec.ReplicationOptions, replicationOptionVerboseLogs),
 	}
 
 	if cpc.Spec.CsiEphemeralLimit != "" {
@@ -453,6 +470,10 @@ func (p *preparer) prepareReplicationWorkerContainer() corev1.Container {
 
 	if p.config.debugBackup {
 		container.Env = append(container.Env, corev1.EnvVar{Name: "DEBUG_BACKUP", Value: "true"})
+	}
+
+	if p.verboseReplicationWorkerLogs {
+		container.Env = append(container.Env, corev1.EnvVar{Name: "LOG_LEVEL", Value: "DEBUG"})
 	}
 
 	return container

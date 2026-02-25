@@ -1,0 +1,174 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# This is an example using MTC with a v7x superslicing cluster (2 cubes).
+#
+# Replace !DATASET! with the full gs://path/to/your/dataset.
+#
+# Replace !MAXTEXT_IMAGE!, !BUCKET_NAME! and !JOB_NAME! appropriately.
+
+apiVersion: checkpointing.gke.io/v1
+kind: CheckpointConfiguration
+metadata:
+  name: !JOB_NAME!
+spec:
+  cloudStorageBucketName: !BUCKET_NAME!
+  nodeSelector:
+    cloud.google.com/gke-tpu-accelerator: tpu7x
+  tolerations:
+  - key: google.com/tpu
+    operator: Exists
+    effect: NoSchedule
+  inMemoryVolumeSize: 500Gi
+  csiEphemeralLimit: 50Mi
+  gcsFuseMountOptions:
+  - implicit-dirs
+  - metadata-cache:negative-ttl-secs:0
+  - metadata-cache:ttl-secs:-1
+  - metadata-cache:stat-cache-max-size-mb:-1
+  - metadata-cache:type-cache-max-size-mb:-1
+  - file-cache:max-size-mb:-1
+  - file-cache:cache-file-for-range-read:true
+  - file-system:kernel-list-cache-ttl-secs:0
+  - file-cache:enable-parallel-downloads:true
+  - read_ahead_kb=1024
+  - write:enable-streaming-writes:true
+---
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: !JOB_NAME!
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue  # Name of the LocalQueue
+    xpk.google.com/workload: !JOB_NAME!
+spec:
+  ttlSecondsAfterFinished: 43200
+  failurePolicy:
+    rules:
+      - action: FailJobSet
+        onJobFailureReasons:
+        - PodFailurePolicy
+    maxRestarts: 0
+  replicatedJobs:
+    - name: slice-job
+      replicas: 1
+      template:
+        spec:
+          parallelism: 32    # Equal to the number of VMs per slice (or sub-slice).
+          completions: 32    # Same as the above.
+          backoffLimit: 0   # When any pod fails, the job is failed
+
+          podFailurePolicy:
+            rules:
+
+            - action: FailJob
+              onPodConditions: []
+              onExitCodes:
+                containerName: jax-tpu-1
+                operator: NotIn
+                values: [42,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255]
+          template:
+            metadata:
+              labels:
+                xpk.google.com/workload: !JOB_NAME!
+              annotations:
+                cloud.google.com/gke-tpu-slice-topology: 4x4x8
+            spec:
+              schedulerName: default-scheduler
+              imagePullSecrets:
+              - name: None
+              restartPolicy: Never
+
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu7x
+              priorityClassName: medium
+              hostNetwork: true
+              dnsPolicy: ClusterFirstWithHostNet
+              terminationGracePeriodSeconds: 30
+              containers:
+
+              - name: jax-tpu-1
+                image: !MAXTEXT_IMAGE!
+                env:
+                securityContext:
+                  privileged: true
+                command:
+                - bash
+                - -c
+                - |
+                  echo XPK Start: $(date);
+                  _sigterm() (kill -SIGTERM $! 2>/dev/null;);
+                  trap _sigterm SIGTERM;
+
+                  # TPU_PREMAPPED_BUFFER_SIZE is used for chkpt transfer;
+                  # it should be slightly larger than the checkpoint size
+                  # and so also related to the MTC checkpoint configuration
+                  # ramdisk size.
+                  TPU_PREMAPPED_BUFFER_SIZE=64424509440 \
+                  TPU_PREMAPPED_BUFFER_TRANSFER_THRESHOLD_BYTES=64424509440 \
+                  python3 -m MaxText.train maxtext/configs/base.yml \
+                    remat_policy=full \
+                    global_parameter_scale=1 \
+                    base_output_directory=gs://!BUCKET_NAME!/maxtext-superslice \
+                    dataset_type=synthetic \
+                    steps=1000 \
+                    per_device_batch_size=2 \
+                    model_name=llama3.1-70b \
+                    max_target_length=256 \
+                    local_checkpoint_directory=/mtc \
+                    local_checkpoint_period=25 \
+                    enable_multi_tier_checkpointing=True \
+                    use_mtc_process_ids=False \
+                    multi_tier_checkpointing_backup_interval_minutes=15 \
+                    run_name=!JOB_NAME! \
+                    dataset_path=!DATASET! \
+                    enable_goodput_recording=True \
+                    monitor_goodput=True \
+                    allow_split_physical_axes=True enable_checkpoint_cloud_logger=True \
+                    &
+                  PID=$!
+
+                  while kill -0 $PID 2>/dev/null;
+                      do sleep 5;
+                  done;
+                  wait $PID;
+                  EXIT_CODE=$?;
+
+                  echo XPK End: $(date);
+                  echo EXIT_CODE=$EXIT_CODE;
+
+                  exit $EXIT_CODE
+                resources:
+                  requests:
+                    google.com/tpu: 4
+                  limits:
+                    google.com/tpu: 4
+
+                volumeMounts:
+                - mountPath: /dev/shm
+                  name: dshm-2
+                - mountPath: /mtc
+                  name: mtc
+
+              tolerations:
+              - operator: "Exists"
+                key: google.com/tpu
+
+              volumes:
+              - emptyDir:
+                  medium: Memory
+                name: dshm-2
+              - csi:
+                  driver: multitier-checkpoint.csi.storage.gke.io
+                name: mtc

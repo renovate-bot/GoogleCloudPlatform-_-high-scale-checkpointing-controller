@@ -496,6 +496,63 @@ func TestNewPreparer(t *testing.T) {
 			metricsConfig:             &MetricsCollectorConfig{},
 		},
 		{
+			name: "successful verbose logs",
+			cpc: &checkpoint.CheckpointConfiguration{
+				Spec: checkpoint.CheckpointConfigurationSpec{
+					CloudStorageBucketName: "gcs-bucket",
+					InMemoryVolumeSize:     "64Gi",
+					ReplicationOptions:     []string{"verbose-logs"},
+				},
+			},
+			imageMap: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: testCsiNamespace,
+					Name:      mapName,
+				},
+				Data: map[string]string{
+					"registrar-image":          "registrar",
+					"csi-image":                "csi",
+					"replication-worker-image": "replication",
+					"nfs-server-image":         "nfs",
+					"metrics-collector-image":  "metrics-collector",
+				},
+			},
+			expectedRegistrar:         "registrar",
+			expectedCsi:               "csi",
+			expectedReplicationWorker: "replication",
+			expectedNfsServer:         "nfs",
+			expectedMetricsCollector:  "metrics-collector",
+		},
+		{
+			name: "bad replication option",
+			cpc: &checkpoint.CheckpointConfiguration{
+				Spec: checkpoint.CheckpointConfigurationSpec{
+					CloudStorageBucketName: "gcs-bucket",
+					InMemoryVolumeSize:     "64Gi",
+					ReplicationOptions:     []string{"bad-option"},
+				},
+			},
+			imageMap: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: testCsiNamespace,
+					Name:      mapName,
+				},
+				Data: map[string]string{
+					"registrar-image":          "registrar",
+					"csi-image":                "csi",
+					"replication-worker-image": "replication",
+					"nfs-server-image":         "nfs",
+					"metrics-collector-image":  "metrics-collector",
+				},
+			},
+			errString:                 "bad replicationOptions",
+			expectedRegistrar:         "registrar",
+			expectedCsi:               "csi",
+			expectedReplicationWorker: "replication",
+			expectedNfsServer:         "nfs",
+			expectedMetricsCollector:  "metrics-collector",
+		},
+		{
 			name: "missing metrics collector related images",
 			imageMap: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{

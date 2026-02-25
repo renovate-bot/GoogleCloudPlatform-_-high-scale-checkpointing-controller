@@ -102,9 +102,8 @@ func runAPIOnPod(ctx context.Context, t *testing.T, pod *corev1.Pod, cmd string,
 	return "", nil
 }
 
-func createMultitierJobset(ctx context.Context, t *testing.T, name string, selector map[string]string, numSlices, sliceSize int) *jobsetv1alpha.JobSet {
-	t.Helper()
-	jobset := jobsetv1alpha.JobSet{
+func createMultitierJobsetSpec(name string, selector map[string]string, numSlices, sliceSize int) *jobsetv1alpha.JobSet {
+	return &jobsetv1alpha.JobSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: testNamespace,
@@ -186,11 +185,15 @@ func createMultitierJobset(ctx context.Context, t *testing.T, name string, selec
 			},
 		},
 	}
+}
 
-	err := CRClient.Create(ctx, &jobset)
+func createMultitierJobset(ctx context.Context, t *testing.T, name string, selector map[string]string, numSlices, sliceSize int) *jobsetv1alpha.JobSet {
+	t.Helper()
+	jobset := createMultitierJobsetSpec(name, selector, numSlices, sliceSize)
+	err := CRClient.Create(ctx, jobset)
 	assert.NilError(t, err, "cannot create jobset %s", name)
 	t.Logf("created jobset %s/%s", jobset.GetNamespace(), jobset.GetName())
-	return &jobset
+	return jobset
 }
 
 func getMultitierSelector(ctx context.Context, t *testing.T) map[string]string {
@@ -487,10 +490,11 @@ func getCheckpointConfiguration(t *testing.T) *checkpointv1.CheckpointConfigurat
 					Effect:   corev1.TaintEffectNoSchedule,
 				},
 			},
-			InMemoryVolumeSize: "10",
+			InMemoryVolumeSize: "10Mi",
 			// The CsiEphemeralLimit needs to be small in order to fit
 			// into the small boot disks of our nodes.
-			CsiEphemeralLimit: "50Mi",
+			CsiEphemeralLimit:  "50Mi",
+			ReplicationOptions: []string{"verbose-logs"},
 		},
 	}
 }
@@ -515,23 +519,51 @@ func deleteCheckpointConfigurations(ctx context.Context, t *testing.T) {
 	})
 }
 
-// MultitierOptions affects deployMultitier. The only option now is for the
-// CheckpointConfiguration; more interface methods will need to be added
-// if we have more options.
+type MultitierOptionValues struct {
+	gcsFuseMountOptions []string
+	useDefaultNamespace bool
+	ramdiskSize         string
+	tpuKind             string
+}
+
+// MultitierOptions affects deployMultitier.
 type MultitierOptions interface {
-	updateCheckpointConfiguration(*checkpointv1.CheckpointConfiguration)
+	updateValues(opts *MultitierOptionValues)
 }
 
 type gcsMountOptions []string
 
-func (opts gcsMountOptions) updateCheckpointConfiguration(cpc *checkpointv1.CheckpointConfiguration) {
-	cpc.Spec.GcsFuseMountOptions = []string(opts)
+func (opts gcsMountOptions) updateValues(vals *MultitierOptionValues) {
+	vals.gcsFuseMountOptions = append(vals.gcsFuseMountOptions, []string(opts)...)
+}
+
+type useDefaultNamespace struct{}
+
+func (_ useDefaultNamespace) updateValues(vals *MultitierOptionValues) {
+	vals.useDefaultNamespace = true
+}
+
+type ramdiskSize string
+
+func (size ramdiskSize) updateValues(vals *MultitierOptionValues) {
+	vals.ramdiskSize = string(size)
+}
+
+type tpuKind string
+
+func (tpu tpuKind) updateValues(vals *MultitierOptionValues) {
+	vals.tpuKind = string(tpu)
 }
 
 // deployMultitier installs everything required for the multitier controller, and
 // returns a cleanup func that should be deferred by the caller.
 func deployMultitier(ctx context.Context, t *testing.T, opts ...MultitierOptions) func() {
 	t.Helper()
+
+	var vals MultitierOptionValues
+	for _, opt := range opts {
+		opt.updateValues(&vals)
+	}
 
 	cleanupFns := []func(){}
 	runCleanupFns := func() {
@@ -553,15 +585,23 @@ func deployMultitier(ctx context.Context, t *testing.T, opts ...MultitierOptions
 	cleanupFns = append(cleanupFns, func() { undeployDir(ctx, t, multitierControllerDir) })
 
 	cpc := getCheckpointConfiguration(t)
-	for _, opt := range opts {
-		opt.updateCheckpointConfiguration(cpc)
+	cpc.Spec.GcsFuseMountOptions = vals.gcsFuseMountOptions
+	if vals.ramdiskSize != "" {
+		cpc.Spec.InMemoryVolumeSize = vals.ramdiskSize
+	}
+	if vals.tpuKind != "" {
+		cpc.Spec.NodeSelector = map[string]string{"cloud.google.com/gke-tpu-accelerator": vals.tpuKind}
 	}
 
 	applyCheckpointConfiguration(ctx, t, cpc)
 	cleanupFns = append(cleanupFns, func() { deleteCheckpointConfigurations(ctx, t) })
 
-	namespaceCleanup := testNamespaceSetup(ctx, t)
-	cleanupFns = append(cleanupFns, namespaceCleanup)
+	if vals.useDefaultNamespace {
+		testNamespace = "default"
+	} else {
+		namespaceCleanup := testNamespaceSetup(ctx, t)
+		cleanupFns = append(cleanupFns, namespaceCleanup)
+	}
 
 	normalExit = true
 	return runCleanupFns
@@ -1191,7 +1231,7 @@ func TestScaleMultitierJobRecreate(t *testing.T) {
 }
 
 func TestScaleMultitierPodFailures(t *testing.T) {
-	params := getScaleTestParams(t)
+	params := getSupersliceTestParams(t)
 
 	ctx := context.Background()
 

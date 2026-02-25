@@ -86,7 +86,7 @@ webhook (it needs 500m cores, or 1 if doing scale tests); e2-standard-4 should
 be used instead.
 
 ```
-kubectl apply --server-side -f https://github.com/kubernetes-sigs/jobset/releases/download/v0.7.3/manifests.yaml
+kubectl apply --server-side -f https://github.com/kubernetes-sigs/jobset/releases/download/v0.11.1/manifests.yaml
 ```
 
 If running scale tests on more than 10s of nodes, the jobset memory needs to be
@@ -98,6 +98,34 @@ increased:
 ```
 
 The `openssl` binary must be available, eg `apt install -y openssl`.
+
+## Emulated Job Tests
+
+These tests use the emulated job from the [Checkpoint
+Replicator](https://github.com/GoogleCloudPlatform/checkpoint-replicator)
+repository to simluate a training job on conventional hardware. The emulated job
+accurately creates checkpoints files with simluated data, and the test runs with
+the production checkpoint replicator in the MTC CSI driver pod.
+
+These tests require some special setup and are delicate to run. They are meant
+to be used by themselves rather than run as part of a bigger test suite for this
+reason. See the `superslice-test` and `multislice-test` rules in the Makefile
+for some hints on how to run them. They use `grane` and `yq`, which can be
+installed from
+https://github.com/google/go-containerregistry/blob/main/cmd/gcrane/README.md
+and https://github.com/mikefarah/yq.
+
+Unlike other deployment tests, these run in the default namespace as a KSA is
+used for the workload in addition to the driver. In addition to the node driver
+KSA permissions menionted above, the following should be done.
+
+```
+kubectl create sa gcs
+project_number=$(gcloud projects describe ${PROJECT:?} --format "value(projectNumber)")
+gcloud storage buckets add-iam-policy-binding gs://${BUCKET_NAME:?}  \
+  --member "principal://iam.googleapis.com/projects/${project_number}/locations/global/workloadIdentityPools/${PROJECT:?}.svc.id.goog/subject/ns/default/sa/gcs" \
+  --role roles/storage.objectUser
+```
 
 ## Phase 1
 

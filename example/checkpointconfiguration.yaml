@@ -24,7 +24,7 @@ metadata:
 spec:
   cloudStorageBucketName: !BUCKET!
   nodeSelector:
-    node.kubernetes.io/instance-type: e2-small
+    kind: checkpoint
   tolerations:
   - key: checkpoint
     operator: Exists

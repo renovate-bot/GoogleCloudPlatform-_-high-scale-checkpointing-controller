@@ -104,6 +104,11 @@ func (in *CheckpointConfigurationSpec) DeepCopyInto(out *CheckpointConfiguration
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.ReplicationOptions != nil {
+		in, out := &in.ReplicationOptions, &out.ReplicationOptions
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.GcsFuseMountOptions != nil {
 		in, out := &in.GcsFuseMountOptions, &out.GcsFuseMountOptions
 		*out = make([]string, len(*in))

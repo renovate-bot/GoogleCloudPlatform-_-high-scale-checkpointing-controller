@@ -34,24 +34,25 @@ type CheckpointConfiguration struct {
 
 // CheckpointConfigurationSpec is the spec for a CheckpointConfiguration resource.
 type CheckpointConfigurationSpec struct {
-	CloudStorageBucketName      string              `json:"cloudStorageBucketName,omitempty" protobuf:"bytes,2,opt,name=cloudStorageBucketName"`
-	EnableExternalJaxProcessIds bool                `json:"enableExternalJaxProcessIds,omitempty" protobuf:"bytes,3,opt,name=enableExternalJaxProcessIds"`
-	NodeSelector                map[string]string   `json:"nodeSelector,omitempty" protobuf:"bytes,4,opt,name=nodeSelector"`
-	Tolerations                 []corev1.Toleration `json:"tolerations,omitempty" protobuf:"bytes,5,rep,name=tolerations"`
-	InMemoryVolumeSize          string              `json:"inMemoryVolumeSize,omitempty" protobuf:"bytes,6,rep,name=inMemoryVolumeSize"`
-	CsiEphemeralLimit           string              `json:"csiEphemeralLimit,omitempty" protobuf:"bytes,7,rep,name=csiEphemeralLimit"`
+	CloudStorageBucketName      string              `json:"cloudStorageBucketName,omitempty"`
+	EnableExternalJaxProcessIds bool                `json:"enableExternalJaxProcessIds,omitempty"`
+	NodeSelector                map[string]string   `json:"nodeSelector,omitempty"`
+	Tolerations                 []corev1.Toleration `json:"tolerations,omitempty"`
+	InMemoryVolumeSize          string              `json:"inMemoryVolumeSize,omitempty"`
+	CsiEphemeralLimit           string              `json:"csiEphemeralLimit,omitempty"`
+	ReplicationOptions          []string            `json:"replicationOptions,omitempty"`
 
 	// GcsFuseMountOptions is a comma-separated list of mount options. This is
 	// copied directly into the mountOptions for the driver GCS volume.
-	GcsFuseMountOptions []string `json:"gcsFuseMountOptions,omitempty" protobuf:"bytes,8,rep,name=gcsFuseMountOptions"`
+	GcsFuseMountOptions []string `json:"gcsFuseMountOptions,omitempty"`
 }
 
 // CheckpointConfigurationSpeceList is a list of CheckpointConfiguration resources.
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 type CheckpointConfigurationList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
-	Items           []CheckpointConfiguration `json:"items" protobuf:"bytes,2,rep,name=items"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []CheckpointConfiguration `json:"items"`
 }
 
 // CheckpointConfigurationStatus represents the current status of the configuration.

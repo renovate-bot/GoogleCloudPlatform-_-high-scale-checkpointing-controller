@@ -246,9 +246,12 @@ func createUniqueNodePool(ctx context.Context, opts ...NodePoolOption) string {
 		"node-pools",
 		"create",
 		candidate,
-		"--no-enable-autoupgrade",
 		"--quiet",
 	}
+	if strings.ToLower(os.Getenv("ALLOW_AUTO_UPGRADE")) != "true" {
+		args = append(args, "--no-enable-autoupgrade")
+	}
+
 	var options NodePoolOptions
 	for _, o := range opts {
 		o.Update(&options)

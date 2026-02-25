@@ -20,6 +20,7 @@ import (
 	"maps"
 	"net"
 	"slices"
+	"strings"
 	"sync"
 
 	"google.golang.org/grpc"
@@ -41,6 +42,21 @@ import (
 
 	proto "gke-internal.googlesource.com/gke-storage/high-scale-checkpointing/lib/grpc/ranks/proto"
 	"gke-internal.googlesource.com/gke-storage/high-scale-checkpointing/pkg/util"
+)
+
+const (
+	supersliceCubeSize = 16
+
+	exclusiveTopologyKey = "alpha.jobset.sigs.k8s.io/exclusive-topology"
+	sliceTopologyKey     = "cloud.google.com/gke-tpu-slice-topology"
+	tpuAcceleratorKey    = "cloud.google.com/gke-tpu-accelerator"
+	workloadKindKey      = "multitier-checkpoint.gke.io/workload-kind"
+
+	nodepoolLabel = "cloud.google.com/gke-nodepool"
+	tpuSliceLabel = "cloud.google.com/gke-tpu-slice"
+
+	supersliceAccelerator          = "tpu7x"
+	emulatedSupersliceWorkloadKind = "emulated-superslice"
 )
 
 type RanksServerOpts struct {
@@ -72,10 +88,19 @@ type podState struct {
 	hasUpdate        bool
 }
 
+type rankTopology int
+
+const (
+	Multislice rankTopology = iota
+	Superslice
+	UnknownTopology
+)
+
 type jobsetState struct {
 	numJobs   int
 	sliceSize int
 	numSlices int
+	topology  rankTopology
 }
 
 type jobsetAssignment struct {
@@ -361,10 +386,55 @@ func (r *ranksServer) HandleJobset(jobset *jobsetv1alpha.JobSet) error {
 	if jobset.Spec.ReplicatedJobs[0].Template.Spec.Parallelism != nil {
 		sliceSize = int(*jobset.Spec.ReplicatedJobs[0].Template.Spec.Parallelism)
 	}
+
+	podTemplate := &jobset.Spec.ReplicatedJobs[0].Template.Spec.Template
+	nodeSelector := podTemplate.Spec.NodeSelector
+	if nodeSelector == nil {
+		nodeSelector = map[string]string{}
+	}
+
+	// Determine the topology, eg multislice or superslice.
+	jobsetAnnotations := jobset.GetAnnotations()
+	tpu := nodeSelector[tpuAcceleratorKey]
+	topology := UnknownTopology
+	if jobsetAnnotations[exclusiveTopologyKey] == nodepoolLabel {
+		klog.Infof("jobset %v using exclusive topology, probably is multislice", jobset.GetName())
+		if tpu == supersliceAccelerator {
+			// TODO: add event recorder
+			klog.Warningf("jobset %v targets tpu7x but used node pool exclusive topology. Using unknown rank topology rather than superslice", jobset.GetName())
+			topology = UnknownTopology
+		} else if tpu == "" {
+			// TODO: add event recorder
+			klog.Warningf("jobset %v is missing %s selector. Assuming multislice topology", jobset.GetName(), tpuAcceleratorKey)
+			topology = Multislice
+		} else if !strings.HasPrefix(tpu, "tpu") {
+			// TODO: add event recorder
+			klog.Warningf("jobset %v targets unknown accelerator %s. Using unknown rank topology rather than multislice", jobset.GetName(), tpu)
+		} else {
+			// TODO: add event recorder
+			klog.Infof("jobset %v detected as multislice for %s", jobset.GetName(), tpu)
+			topology = Multislice
+		}
+	} else if tpu == supersliceAccelerator {
+		if jobsetAnnotations[workloadKindKey] != emulatedSupersliceWorkloadKind && sliceSize%supersliceCubeSize != 0 {
+			// TODO: add event recorder
+			klog.Infof("jobset %v uses %s, but job size of %d doesn't fit into cubes. Using unknown rank topology rather than superslice", jobset.GetName(), supersliceAccelerator, sliceSize)
+			topology = UnknownTopology
+		} else {
+			// TODO: add event recorder
+			klog.Infof("jobset %v detected as superslice", jobset.GetName())
+			topology = Superslice
+		}
+	} else {
+		klog.Warningf("jobset %v has no detected topology, using unknown", jobset.GetName())
+		topology = UnknownTopology
+	}
+
 	r.jobsets[name] = &jobsetState{
 		numSlices: numSlices,
 		numJobs:   numSlices * sliceSize,
 		sliceSize: sliceSize,
+		topology:  topology,
 	}
 	return nil
 }
@@ -573,45 +643,68 @@ func (r *ranksServer) computeAssignment(currPod *podState) (jobsetAssignment, er
 	assignmentRanks := assigner.existingAssignment()
 	var err error
 
-	// Try #1: use the jobset index ranks.
-	if assignmentRanks == nil {
+	// TODO: use recorder to add events for rank strategy used.
+
+	// Try #1: make a superslice assignment (consecutive ranks within cubes).
+	if assignmentRanks == nil && jobsetInfo.topology == Superslice {
+		klog.Info("trying superslice assignment")
+		assignmentRanks, err = assigner.supersliceAssignment()
+		if err != nil {
+			klog.Warningf("when trying superslice assignment: %v", err)
+		}
+	}
+
+	// Try #2: use the jobset index ranks.
+	if (assignmentRanks == nil || err != nil) && jobsetInfo.topology == Multislice {
 		klog.Info("assigning from initial ranks")
 		assignmentRanks, err = assigner.extendFromInitialRanks()
+		if err != nil {
+			klog.Warningf("when trying multislice initial extend: %v", err)
+		}
 	}
 
-	// Try #2: extend from current ranks, ignoring jobset ranks.
-	if err != nil {
+	// Try #3: extend from current ranks, ignoring jobset ranks.
+	if (assignmentRanks == nil || err != nil) && jobsetInfo.topology == Multislice {
 		klog.Infof("assigning from initial ranks failed, assigning arbitrarily: %v", err)
 		assignmentRanks, err = assigner.extendFromCurrentRank()
+		if err != nil {
+			klog.Warningf("when trying multislice current extend: %v", err)
+		}
 	}
 
-	// Try #3: current ranks are impossible, so clear and assign arbitrarily, considering
+	// Try #4: current ranks are impossible, so clear and assign arbitrarily, considering
 	// only the slice topology.
-	if err != nil {
+	if (assignmentRanks == nil || err != nil) && jobsetInfo.topology == Multislice {
 		klog.Errorf("no rank assignment: %v", err)
 		klog.Errorf("clearing current ranks and making arbitrary assignment: %v", err)
 		assigner.clearCurrentRanks()
 		assignmentRanks, err = assigner.extendFromCurrentRank()
+		if err != nil {
+			klog.Warningf("when trying multislice cleared current: %v", err)
+		}
 	}
 
-	// Try #4: Force arbitrary assignment if everything else fails
-	if err != nil {
+	// Try #5: Force arbitrary assignment if everything else fails
+	if assignmentRanks == nil || err != nil {
 		klog.Errorf("strict assignment failed: %v. Falling back to arbitrary assignment", err)
 		assignmentRanks, err = assigner.forceArbitraryAssignment()
 	}
 
 	// These should only be internal errors or some fundamental user configuration problem.
 	if err != nil {
+		klog.Errorf("assignment impossible: %v", err)
 		return jobsetAssignment{}, status.Errorf(codes.InvalidArgument, "no valid rank assignment possible: %v", err)
 	}
 
 	if len(assignmentRanks) != jobsetInfo.numJobs {
-		return jobsetAssignment{}, status.Errorf(codes.Internal, "assignment length mismatch for %v: %d vs %d", currPod.jobset, len(assignmentRanks), jobsetInfo.numJobs)
+		errStr := fmt.Sprintf("assignment length mismatch for %v: %d vs %d", currPod.jobset, len(assignmentRanks), jobsetInfo.numJobs)
+		klog.Errorf("assignment impossible: %s", errStr)
+		return jobsetAssignment{}, status.Error(codes.Internal, errStr)
 	}
 
-	controllerPod, found := nodeToPod[assignmentRanks[0].name]
+	controllerPod, found := nodeToPod[assignmentRanks[0]]
 	if !found {
-		return jobsetAssignment{}, status.Errorf(codes.Internal, "nodeToPod missing controller %s", assignmentRanks[0].name)
+		return jobsetAssignment{}, status.Errorf(codes.Internal, "nodeToPod missing controller %s", assignmentRanks[0])
 	}
 	controllerIP := controllerPod.ip
 	if controllerIP == "" {
@@ -621,12 +714,12 @@ func (r *ranksServer) computeAssignment(currPod *podState) (jobsetAssignment, er
 	rankToPod := make([]types.UID, len(assignmentRanks))
 	podToRank := map[types.UID]int{}
 	for i := range len(assignmentRanks) {
-		if assignmentRanks[i] == nil {
+		if assignmentRanks[i] == "" {
 			return jobsetAssignment{}, status.Errorf(codes.Internal, "incomplete assignment for rank %d", i)
 		}
-		p, found := nodeToPod[assignmentRanks[i].name]
+		p, found := nodeToPod[assignmentRanks[i]]
 		if !found {
-			return jobsetAssignment{}, status.Errorf(codes.Internal, "nodeToPod missing update %s", assignmentRanks[i].name)
+			return jobsetAssignment{}, status.Errorf(codes.Internal, "nodeToPod missing update %s", assignmentRanks[i])
 		}
 		if p.rank >= 0 && p.rank != i {
 			klog.Infof("on %s overridding existing rank %d to %d", p.node, p.rank, i)

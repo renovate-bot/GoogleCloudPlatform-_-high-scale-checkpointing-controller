@@ -165,6 +165,9 @@ func createJobSet(ctx context.Context, t *testing.T, name string, slices, worker
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: "default",
+			Annotations: map[string]string{
+				"alpha.jobset.sigs.k8s.io/exclusive-topology": "cloud.google.com/gke-nodepool",
+			},
 		},
 		Spec: jobsetv1alpha.JobSetSpec{
 			ReplicatedJobs: []jobsetv1alpha.ReplicatedJob{

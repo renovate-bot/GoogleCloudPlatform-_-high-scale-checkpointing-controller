@@ -93,7 +93,8 @@ type ControllerOptions struct {
 	HealthProbeBindAddress  string
 	LegacyIdFile            bool
 	RanksServerPort         int
-	//gke metrics collector
+
+	// GKE metrics collector
 	EnableMetricsCollector  bool
 	MetricsCollectorConfig  *MetricsCollectorConfig
 	EnableUptimeController  bool

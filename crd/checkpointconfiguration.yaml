@@ -64,6 +64,10 @@ spec:
                 type: array
                 items:
                   type: string
+              replicationOptions:
+                type: array
+                items:
+                  type: string
           status:
             type: object
             properties:
